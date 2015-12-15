@@ -2,23 +2,17 @@ package httpDigestAuth
 
 import (
 	"fmt"
-	//"io/ioutil"
+	"io/ioutil"
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
-	"log"
 	"net/http"
-	"net/url"
 	"strings"
 )
 
-type myjar struct {
-	jar map[string][]*http.Cookie
-}
-
-// DigestHeaders tracks the state of authentication
-type DigestHeaders struct {
+// DigestAuthClient tracks the state of authentication
+type DigestAuthClient struct {
 	Realm     string
 	Qop       string
 	Method    string
@@ -34,15 +28,15 @@ type DigestHeaders struct {
 	Password  string
 }
 
-func (p *myjar) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	p.jar[u.Host] = cookies
+func NewDigestAuthClient(realm string, username string, password string) (*DigestAuthClient, error) {
+    client := &DigestAuthClient{}
+    client.Realm = realm
+    client.Username = username
+    client.Password = password
+    return client, nil
 }
 
-func (p *myjar) Cookies(u *url.URL) []*http.Cookie {
-	return p.jar[u.Host]
-}
-
-func (d *DigestHeaders) digestChecksum() {
+func (d *DigestAuthClient) digestChecksum() {
 	switch d.Algorithm {
 	case "MD5":
 		// A1
@@ -62,8 +56,8 @@ func (d *DigestHeaders) digestChecksum() {
 	}
 }
 
-// ApplyAuth adds proper auth header to the passed request
-func (d *DigestHeaders) ApplyAuth(req *http.Request) {
+// applyAuth adds proper auth header to the passed request
+func (d *DigestAuthClient) applyAuth(req *http.Request) {
 	d.Nc += 0x1
 	d.Cnonce = randomKey()
 	d.Method = req.Method
@@ -81,28 +75,21 @@ func (d *DigestHeaders) ApplyAuth(req *http.Request) {
 }
 
 // Auth authenticates against a given URI
-func (d *DigestHeaders) Auth(username string, password string, uri string) (*DigestHeaders, error) {
+func (d *DigestAuthClient) Auth(client *http.Client, req *http.Request) (resp_body []byte, err error) {
 
-	client := &http.Client{}
-	jar := &myjar{}
-	jar.jar = make(map[string][]*http.Cookie)
-	client.Jar = jar
-
-	req, err := http.NewRequest("GET", uri, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatal(err)
+		return
 	}
+
 	if resp.StatusCode == 401 {
 
 		authn := digestAuthParams(resp)
+		resp.Body.Close()
+
 		algorithm := authn["algorithm"]
-		d := &DigestHeaders{}
-		u, _ := url.Parse(uri)
-		d.Path = u.RequestURI()
+		d.Method = req.Method
+		d.Path = req.URL.RequestURI()
 		d.Realm = authn["realm"]
 		d.Qop = authn["qop"]
 		d.Nonce = authn["nonce"]
@@ -113,22 +100,38 @@ func (d *DigestHeaders) Auth(username string, password string, uri string) (*Dig
 			d.Algorithm = authn["algorithm"]
 		}
 		d.Nc = 0x0
-		d.Username = username
-		d.Password = password
 
-		req, err = http.NewRequest("GET", uri, nil)
-		d.ApplyAuth(req)
+		d.applyAuth(req)
 		resp, err = client.Do(req)
 		if err != nil {
-			log.Fatal(err)
+			return
 		}
-		if resp.StatusCode != 200 {
-			d = &DigestHeaders{}
+
+		if resp.StatusCode == 200 {
+			goto SUCC
+
+		} else {
 			err = fmt.Errorf("response status code was %v", resp.StatusCode)
+			return
 		}
-		return d, err
+
+	} else if resp.StatusCode == 200 {
+		goto SUCC
+
+	} else {
+		err = fmt.Errorf("response status code was %v", resp.StatusCode)
+		return
 	}
-	return nil, fmt.Errorf("response status code should have been 401, it was %v", resp.StatusCode)
+
+SUCC:
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		fmt.Printf("read http body error: %v\n", err)
+		return
+	}
+	resp.Body.Close()
+
+	return body, nil
 }
 
 /*
